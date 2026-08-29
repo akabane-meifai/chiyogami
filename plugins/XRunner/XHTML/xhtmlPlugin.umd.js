@@ -22,9 +22,7 @@
         for (const attr of this.attributes) {
           node.setAttribute(attr.name, attr.value);
         }
-        for (const child of this.childNodes) {
-          node.append(ctx.run(child, 'getNode'));
-        }
+        node.append(...ctx.getChildNodes(this, 'getNode'));
         return node;
       }
     };

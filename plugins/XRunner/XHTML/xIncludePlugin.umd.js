@@ -17,8 +17,18 @@
     }
     const ns = 'http://www.w3.org/2001/XInclude';
     const cache = (options.cache && typeof options.cache === 'object') ? options.cache : {};
-    const parser = new DOMParser();
     const evaluateXPointer = (doc, xpointerStr) => null;
+    const getXml = url => {
+      if (cache[url]) {
+        return Promise.resolve(cache[url]);
+      }
+      fetch(url)
+        .then(res => res.text())
+        .then(xml => {
+          cache[url] = xml;
+          return Promise.resolve(xml);
+        });
+    };
     const eInclude = {
       getNode(ctx) {
         if (this.hasAttribute('href')) {
@@ -32,12 +42,12 @@
               const targetNodes = evaluateXPointer(doc, xpointer);
               const fragment = document.createDocumentFragment();
               if (targetNodes && targetNodes.length > 0) {
-                const nodes = Array.from(targetNodes, node => ctx.runner.fromNode(node, 'getNode'));
+                const nodes = Array.from(targetNodes, node => ctx.fromNode(node, 'getNode'));
                 fragment.append(...nodes);
               }
               return fragment;
             }
-            return ctx.runner.fromString(data, 'getNode');
+            return ctx.fromString(data, 'getNode');
           };
           if (cache[href]) {
             return getInclde(cache[href]);
@@ -56,6 +66,14 @@
         return '';
       }
     };
+    
+    if (Array.isArray(options.protocols)) {
+      for (const protocol of options.protocols) {
+        runner
+          .defineProtocol(protocol, getXml);
+      }
+    }
+    
     runner
       .defineNS('element', ns, 'include', eInclude);
     
