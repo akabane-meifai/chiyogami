@@ -10,7 +10,7 @@
   function memoryPlugin(client, options = {}){
     const dataSource = (options.sources && typeof options.sources === 'object') ? options.sources : {};
     client
-      .setHandler('memory:', { setSource })
+      .setHandler('memory:', { setSource, encodeMediaType })
       .define('memory:', handler);
     return { name: 'memory' };
     function handler(request) {
@@ -22,11 +22,11 @@
             .keys(dataSource[host])
             .filter(path => path.startsWith(pathname))
             .map(path => new URL(path, request.url).href);
-          return Promise.resolve(createJsonResponse({ url }));
+          return { data: { url } };
         } else if (dataSource[host][pathname]) {
           const data = dataSource[host][pathname];
           const headers = (data instanceof Blob && data.type) ? {'Content-Type': data.type} : {}; 
-          return Promise.resolve(new Response(data, { status: 200, headers }));
+          return new Response(data, { status: 200, headers });
         }
       } else if (request.method === 'POST') {
         if(pathname.endsWith('/')) {
@@ -48,16 +48,16 @@
                 }
                 return null;
               }).filter(value => value != null);
-              return Promise.resolve(createJsonResponse({ url }));
+              return { data: { url } };
             }, err => {
-              return Promise.resolve(createJsonResponse({}));
+              return { data: {} };
             });
           }
           return request.blob().then(blob => {
             const randomName = crypto.randomUUID();
             const append = new URL(randomName, request.url);
             dataSource[host][append.pathname] = blob;
-            return Promise.resolve(createJsonResponse({ url: append.href }));
+            return { data: { url: append.href } };
           });
         }
       } else if (request.method === 'PUT') {
@@ -76,20 +76,20 @@
               }
               return null;
             }).filter(value => value != null);
-            return Promise.resolve(createJsonResponse({ url }));
+            return { data: { url } };
           }, err => {
-            return Promise.resolve(createJsonResponse({}));
+            return { data: {} };
           });
         }
         return request.blob().then(blob => {
           dataSource[host][pathname] = blob;
-          return Promise.resolve(createJsonResponse({ url: request.url }));
+          return { data: { url: request.url } };
         });
       } else if (request.method === 'DELETE') {
         delete dataSource[host][pathname];
-        return Promise.resolve(createJsonResponse({ url: request.url }));
+        return { data: { url: request.url } };
       }
-      return Promise.resolve(new Response('', { status: 404 }));
+      return new Response('', { status: 404 });
     }
     function setSource(ctx, path, data) {
       const { name, sources } = ctx;
@@ -102,8 +102,17 @@
       }
       sources[name][path] = data;
     }
-    function createJsonResponse(data, status = 200) {
-      return new Response(JSON.stringify(data), { status, headers: {'Content-Type': 'application/json'}});
+    function encodeMediaType(obj, media) {
+      if (/^(?:\*|application)\/(?:\*|json)$/.test(media.type)) {
+        return new Response(
+          JSON.stringify(obj.data),
+          {
+            status: obj.status ?? 200,
+            headers: {'Content-Type': 'application/json'}
+          }
+        );
+      }
+      return null;
     }
   }
   return memoryPlugin;
