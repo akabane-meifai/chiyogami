@@ -39,10 +39,14 @@
     const archives = (options.sources && typeof options.sources === 'object') ? options.sources : {};
 
     client
-      .setHandler('zip:', { setSource, encodeMediaType })
+      .setHandler('zip:', { setSource, getSource, encodeMediaType })
       .define('zip:', handler);
 
     return { name: 'zip' };
+
+    function getSource(ctx) {
+      return archives[ctx.name] || null;
+    }
 
     async function handler(request) {
       const url = new URL(request.url);
@@ -111,44 +115,53 @@
       if (request.method === 'PUT' || request.method === 'POST') {
         const contentType = request.headers.get('Content-Type') || '';
 
-        if (!pathname || contentType.includes('application/zip')) {
+        // 1. Replace entire ZIP archive
+        if (!pathname && contentType.includes('application/zip')) {
           const blob = await request.blob();
           const parsed = await parseZip(blob);
           archives[host] = parsed;
           return { data: { url: request.url, files: [...parsed.entries.keys()] } };
         }
 
-        const data = new Uint8Array(await request.arrayBuffer());
-        let compression = 8;
-
-        const headerVal = request.headers.get('X-Compression');
-        if (headerVal !== null) {
-          compression = parseInt(headerVal, 10);
-        } else if (request.headers.get('X-No-Compression') === 'true') {
-          compression = 0;
-        }
-
-        let compressedData = null;
-        if (compression === 8) {
+        // 2. Add or update files via multipart/form-data
+        if (contentType.includes('multipart/form-data')) {
           try {
-            compressedData = await deflate(data);
-          } catch (e) {
-            console.warn('Deflate error, falling back to STORE:', e);
-            compression = 0;
+            const formData = await request.formData();
+            const addedUrls = [];
+
+            for (const [key, value] of formData.entries()) {
+              if (value instanceof Blob) {
+                // Determine file path (prioritize path in URL if available; otherwise use file/key name)
+                let entryPath = pathname;
+                if (!entryPath || entryPath.endsWith('/')) {
+                  const fileName = value.name || key;
+                  entryPath = `${entryPath}${fileName}`;
+                }
+
+                const data = new Uint8Array(await value.arrayBuffer());
+                const entry = await createZipEntry(entryPath, data, request.headers);
+                archive.entries.set(entryPath, entry);
+                
+                addedUrls.push(new URL(entryPath, request.url).href);
+              }
+            }
+
+            return { data: { url: addedUrls.length === 1 ? addedUrls[0] : addedUrls } };
+          } catch (err) {
+            return new Response(`Multipart Error: ${err.message}`, { status: 400 });
           }
         }
 
-        const entry = {
-          fileName: pathname,
-          data,
-          compressedData: compression === 8 ? compressedData : null,
-          compression,
-          crc: crc32(data),
-          lastMod: new Date()
-        };
+        // 3. Add or update single binary file (Octet-Stream, etc.)
+        if (!pathname) {
+          return new Response('Bad Request: Missing file path', { status: 400 });
+        }
+
+        const data = new Uint8Array(await request.arrayBuffer());
+        const entry = await createZipEntry(pathname, data, request.headers);
 
         archive.entries.set(pathname, entry);
-        return { data: { url: request.url, crc: entry.crc.toString(16), compression } };
+        return { data: { url: request.url, crc: entry.crc.toString(16), compression: entry.compression } };
       }
 
       // ==================== DELETE ====================
@@ -165,6 +178,38 @@
       }
 
       return new Response('Method Not Allowed', { status: 405 });
+    }
+
+    // ==============================
+    // Entry Creation Helper
+    // ==============================
+    async function createZipEntry(filePath, data, headers) {
+      let compression = 8;
+      const headerVal = headers.get('X-Compression');
+      if (headerVal !== null) {
+        compression = parseInt(headerVal, 10);
+      } else if (headers.get('X-No-Compression') === 'true') {
+        compression = 0;
+      }
+
+      let compressedData = null;
+      if (compression === 8) {
+        try {
+          compressedData = await deflate(data);
+        } catch (e) {
+          console.warn('Deflate error, falling back to STORE:', e);
+          compression = 0;
+        }
+      }
+
+      return {
+        fileName: filePath,
+        data,
+        compressedData: compression === 8 ? compressedData : null,
+        compression,
+        crc: crc32(data),
+        lastMod: new Date()
+      };
     }
 
     // ==============================
