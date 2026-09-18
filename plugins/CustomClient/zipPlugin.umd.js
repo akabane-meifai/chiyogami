@@ -36,7 +36,6 @@
   // Main Plugin
   // ==============================
   function zipPlugin(client, options = {}) {
-    // Internal storage: host -> { entries: Map<fileName, Entry> }
     const archives = (options.sources && typeof options.sources === 'object') ? options.sources : {};
 
     client
@@ -51,7 +50,6 @@
       let pathname = decodeURIComponent(url.pathname);
       if (pathname.startsWith('/')) pathname = pathname.slice(1);
 
-      // Initialize archive if it does not exist
       if (!archives[host]) {
         if (request.method === 'PUT' || request.method === 'POST') {
           archives[host] = { entries: new Map() };
@@ -73,19 +71,15 @@
           const index = url.searchParams.has('index') ? url.searchParams.get('index') : false;
           const zipBlob = await buildZip(archive, { index });
           
-          const mimeType = 'application/zip';
-          const ext = 'zip';
-
           return new Response(zipBlob, {
             status: 200,
             headers: {
-              'Content-Type': mimeType,
-              'Content-Disposition': `attachment; filename="${host}.${ext}"`
+              'Content-Type': 'application/zip',
+              'Content-Disposition': `attachment; filename="${host}.zip"`
             }
           });
         }
 
-        // List directory entries
         if (pathname === '' || pathname.endsWith('/')) {
           const prefix = pathname;
           const list = [];
@@ -97,15 +91,9 @@
           return { data: { url: list } };
         }
 
-        // Retrieve an individual file
         const entry = archive.entries.get(pathname);
         if (!entry) {
           return new Response('File Not Found', { status: 404 });
-        }
-
-        const calculated = crc32(entry.data);
-        if (calculated !== entry.crc) {
-          console.warn(`CRC32 mismatch for ${pathname}`);
         }
 
         const mime = guessMime(pathname);
@@ -123,7 +111,6 @@
       if (request.method === 'PUT' || request.method === 'POST') {
         const contentType = request.headers.get('Content-Type') || '';
 
-        // Replace entire archive (upload ZIP directly)
         if (!pathname || contentType.includes('application/zip')) {
           const blob = await request.blob();
           const parsed = await parseZip(blob);
@@ -131,10 +118,7 @@
           return { data: { url: request.url, files: [...parsed.entries.keys()] } };
         }
 
-        // Add or update an individual file
         const data = new Uint8Array(await request.arrayBuffer());
-
-        // Determine compression method (default: 8 / Deflate)
         let compression = 8;
 
         const headerVal = request.headers.get('X-Compression');
@@ -144,21 +128,20 @@
           compression = 0;
         }
 
-        // Fallback to STORE (0) if CompressionStream is unavailable
-        if (compression === 8 && typeof CompressionStream === 'undefined') {
-          console.warn('CompressionStream is not supported. Falling back to STORE (0).');
-          compression = 0;
-        }
-
         let compressedData = null;
         if (compression === 8) {
-          compressedData = await deflate(data);
+          try {
+            compressedData = await deflate(data);
+          } catch (e) {
+            console.warn('Deflate error, falling back to STORE:', e);
+            compression = 0;
+          }
         }
 
         const entry = {
           fileName: pathname,
           data,
-          compressedData,
+          compressedData: compression === 8 ? compressedData : null,
           compression,
           crc: crc32(data),
           lastMod: new Date()
@@ -217,7 +200,6 @@
       const view = new DataView(buffer);
       const entries = new Map();
 
-      // Search for EOCD
       let eocd = -1;
       for (let i = buffer.byteLength - 22; i >= 0; i--) {
         if (view.getUint32(i, true) === 0x06054b50) {
@@ -243,7 +225,7 @@
         const localOffset = view.getUint32(offset + 42, true);
 
         const nameBytes = new Uint8Array(buffer, offset + 46, nameLen);
-        const fileName = new TextDecoder().decode(nameBytes);
+        const fileName = new TextDecoder('utf-8').decode(nameBytes);
 
         const fileNameLenLocal = view.getUint16(localOffset + 26, true);
         const extraLenLocal = view.getUint16(localOffset + 28, true);
@@ -257,10 +239,6 @@
           data = await inflate(compressed);
         } else {
           throw new Error(`Unsupported compression method: ${compression}`);
-        }
-
-        if (crc32(data) !== crc) {
-          console.warn(`CRC32 mismatch for ${fileName}`);
         }
 
         entries.set(fileName, {
@@ -306,63 +284,62 @@
         const uncompressedSize = entry.data.byteLength;
         const compressedSize = compressed.byteLength;
 
-        // --- Local File Header ---
-        const local = new ArrayBuffer(30 + nameBytes.length);
-        const localView = new DataView(local);
-        localView.setUint32(0, 0x04034b50, true);
-        localView.setUint16(4, 20, true);
-        localView.setUint16(6, 0, true);
-        localView.setUint16(8, compression, true);
+        // --- Local File Header (30 Bytes) ---
+        const localHeader = new ArrayBuffer(30);
+        const localView = new DataView(localHeader);
+        localView.setUint32(0, 0x04034b50, true); // Local header signature
+        localView.setUint16(4, 20, true);         // Version needed: 2.0
+        localView.setUint16(6, 0x0800, true);     // General purpose bit flag (Bit 11: UTF-8)
+        localView.setUint16(8, compression, true);// Compression method
         localView.setUint16(10, dosTime(now), true);
         localView.setUint16(12, dosDate(now), true);
         localView.setUint32(14, crc, true);
         localView.setUint32(18, compressedSize, true);
         localView.setUint32(22, uncompressedSize, true);
         localView.setUint16(26, nameBytes.length, true);
-        localView.setUint16(28, 0, true); // No Extra Field
+        localView.setUint16(28, 0, true);         // Extra field length
 
-        parts.push(local, nameBytes, compressed);
+        parts.push(localHeader, nameBytes, compressed);
 
-        // --- Central Directory Header ---
-        const centralHeader = new ArrayBuffer(46 + nameBytes.length);
+        // --- Central Directory Header (46 Bytes) ---
+        const centralHeader = new ArrayBuffer(46);
         const cView = new DataView(centralHeader);
-        cView.setUint32(0, 0x02014b50, true);
-        cView.setUint16(4, 20, true);
-        cView.setUint16(6, 20, true);
-        cView.setUint16(8, 0, true);
-        cView.setUint16(10, compression, true);
+        cView.setUint32(0, 0x02014b50, true);     // Central directory signature
+        cView.setUint16(4, 0x0014, true);         // Version made by: 2.0 / MS-DOS FAT
+        cView.setUint16(6, 20, true);             // Version needed: 2.0
+        cView.setUint16(8, 0x0800, true);         // General purpose bit flag (UTF-8)
+        cView.setUint16(10, compression, true);   // Compression method
         cView.setUint16(12, dosTime(now), true);
         cView.setUint16(14, dosDate(now), true);
         cView.setUint32(16, crc, true);
         cView.setUint32(20, compressedSize, true);
         cView.setUint32(24, uncompressedSize, true);
         cView.setUint16(28, nameBytes.length, true);
-        cView.setUint16(30, 0, true);
-        cView.setUint16(32, 0, true);
-        cView.setUint16(34, 0, true);
-        cView.setUint16(36, 0, true);
-        cView.setUint32(38, 0, true);
-        cView.setUint32(42, offset, true);
+        cView.setUint16(30, 0, true);             // Extra field length
+        cView.setUint16(32, 0, true);             // File comment length
+        cView.setUint16(34, 0, true);             // Disk number start
+        cView.setUint16(36, 0, true);             // Internal file attributes
+        cView.setUint32(38, 0x00000020, true);     // External file attributes (DOS Archive)
+        cView.setUint32(42, offset, true);         // Relative offset of local header
 
         central.push(centralHeader, nameBytes);
         offset += 30 + nameBytes.length + compressedSize;
       }
 
-      // End of Central Directory (EOCD)
+      // --- End of Central Directory (EOCD) Header (22 Bytes) ---
       const centralSize = central.reduce((sum, p) => sum + p.byteLength, 0);
       const eocd = new ArrayBuffer(22);
       const eocdView = new DataView(eocd);
-      eocdView.setUint32(0, 0x06054b50, true);
-      eocdView.setUint16(4, 0, true);
-      eocdView.setUint16(6, 0, true);
-      eocdView.setUint16(8, archive.entries.size, true);
-      eocdView.setUint16(10, archive.entries.size, true);
-      eocdView.setUint32(12, centralSize, true);
-      eocdView.setUint32(16, offset, true);
-      eocdView.setUint16(20, 0, true);
+      eocdView.setUint32(0, 0x06054b50, true);   // EOCD signature
+      eocdView.setUint16(4, 0, true);           // Number of this disk
+      eocdView.setUint16(6, 0, true);           // Disk where central directory starts
+      eocdView.setUint16(8, archive.entries.size, true);  // Entries on this disk
+      eocdView.setUint16(10, archive.entries.size, true); // Total entries
+      eocdView.setUint32(12, centralSize, true); // Size of central directory
+      eocdView.setUint32(16, offset, true);      // Offset of central directory
+      eocdView.setUint16(20, 0, true);           // Comment length
 
-      const mimeType = 'application/zip';
-      return new Blob([...parts, ...central, eocd], { type: mimeType });
+      return new Blob([...parts, ...central, eocd], { type: 'application/zip' });
     }
 
     // ==============================
@@ -372,16 +349,39 @@
       if (typeof CompressionStream === 'undefined') {
         throw new Error('CompressionStream is not supported');
       }
-      const cs = new CompressionStream('deflate-raw');
+      
+      let cs;
+      let isRaw = true;
+      try {
+        cs = new CompressionStream('deflate-raw');
+      } catch (e) {
+        cs = new CompressionStream('deflate');
+        isRaw = false;
+      }
+
       const stream = new Blob([data]).stream().pipeThrough(cs);
-      return new Uint8Array(await new Response(stream).arrayBuffer());
+      const buffer = await new Response(stream).arrayBuffer();
+      const result = new Uint8Array(buffer);
+
+      // Strip zlib header (2 bytes) & checksum (4 bytes) if deflate-raw was fallback'd to deflate
+      if (!isRaw) {
+        return result.subarray(2, result.length - 4);
+      }
+      return result;
     }
 
     async function inflate(data) {
       if (typeof DecompressionStream === 'undefined') {
         throw new Error('DecompressionStream is not supported');
       }
-      const ds = new DecompressionStream('deflate-raw');
+
+      let ds;
+      try {
+        ds = new DecompressionStream('deflate-raw');
+      } catch (e) {
+        ds = new DecompressionStream('deflate');
+      }
+
       const stream = new Blob([data]).stream().pipeThrough(ds);
       return new Uint8Array(await new Response(stream).arrayBuffer());
     }
