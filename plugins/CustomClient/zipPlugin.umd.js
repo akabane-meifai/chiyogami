@@ -216,15 +216,15 @@
     // ==============================
     // Helpers
     // ==============================
-    function setSource(ctx, name, data) {
+    function setSource(ctx, data) {
       if (data instanceof Blob || data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
         parseZip(data).then(parsed => {
-          archives[name] = parsed;
-          ctx.sources[name] = parsed;
+          archives[ctx.name] = parsed;
+          ctx.sources[ctx.name] = parsed;
         });
       } else {
-        archives[name] = data;
-        ctx.sources[name] = data;
+        archives[ctx.name] = data;
+        ctx.sources[ctx.name] = data;
       }
     }
 

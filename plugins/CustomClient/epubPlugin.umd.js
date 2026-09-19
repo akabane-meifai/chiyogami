@@ -19,10 +19,10 @@
     // Register handlers and definitions as epub: protocol
     client
       .setHandler('epub:', {
-        setSource: (ctx, name, data) => {
+        setSource: (ctx, data) => {
           // Set source via zip: handler
           if (client.hasHandler('zip:', 'setSource')) {
-            client.applyHandler('zip:', 'setSource', ctx, name, data);
+            client.applyHandler('zip:', 'setSource', ctx, data);
           }
         },
         encodeMediaType: (obj, media) => {
