@@ -51,8 +51,6 @@
     async function handler(request) {
       const url = new URL(request.url);
       const host = url.hostname;
-      let pathname = decodeURIComponent(url.pathname);
-      if (pathname.startsWith('/')) pathname = pathname.slice(1);
 
       if (!archives[host]) {
         if (request.method === 'PUT' || request.method === 'POST') {
@@ -63,6 +61,8 @@
       }
 
       const archive = archives[host];
+      let pathname = decodeURIComponent(url.pathname);
+      if (pathname.startsWith('/')) pathname = pathname.slice(1);
 
       // ==================== GET ====================
       if (request.method === 'GET') {
@@ -85,12 +85,12 @@
           });
         }
 
-        if (pathname === '' || pathname.endsWith('/')) {
+        if (url.pathname.endsWith('/')) {
           const prefix = pathname;
           const list = [];
           for (const name of archive.entries.keys()) {
             if (name.startsWith(prefix)) {
-              list.push(new URL(name, request.url).href);
+              list.push(new URL('/' + name, request.url).href);
             }
           }
           return { data: { url: list } };
