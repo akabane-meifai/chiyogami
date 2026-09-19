@@ -16,22 +16,12 @@
         return { require };
       }
     }
+    
+    const archives = (options.sources && typeof options.sources === 'object') ? options.sources : {};
+    
     // Register handlers and definitions as epub: protocol
     client
-      .setHandler('epub:', {
-        setSource: (ctx, data) => {
-          // Set source via zip: handler
-          if (client.hasHandler('zip:', 'setSource')) {
-            client.applyHandler('zip:', 'setSource', ctx, data);
-          }
-        },
-        encodeMediaType: (obj, media) => {
-          if (client.hasHandler('zip:', 'encodeMediaType')) {
-            return client.applyHandler('zip:', 'encodeMediaType', obj, media);
-          }
-          return null;
-        }
-      })
+      .setHandler('epub:', { setSource, getSource, encodeMediaType })
       .define('epub:', handler);
 
     return { name: 'epub' };
@@ -97,11 +87,11 @@
 
       // --- 3. Delegate request to zip: ---
       // Replace scheme with zip: to create internal request
-      const zipUrl = request.url.replace(/^epub:/i, 'zip:');
-      const zipRequest = new Request(zipUrl, request);
-
-      // Execute CustomClient fetch (triggers zip: handler)
-      const response = await client.fetch(zipRequest);
+      const handlerName = request.method.toLowerCase() + 'Zip';
+      if (!client.hasHandler('zip:', handlerName)) {
+        return new Response('Method Not Allowed', { status: 405 });
+      }
+      const response = await client.applyHandler('zip:', handlerName, request, archives);
 
       // --- 4. Handle response replacement ---
       const accept = request.headers.get('Accept') || '';
@@ -127,13 +117,28 @@
       return response;
     }
 
+    function setSource(ctx, data) {
+      return client.applyHandler('zip:', 'trySetZip', ctx.name, data, archives);
+    }
+
+    function getSource(ctx) {
+      return archives[ctx.name] || null;
+    }
+
+    function encodeMediaType(obj, media) {
+      if (client.hasHandler('zip:', 'encodeMediaType')) {
+        return client.applyHandler('zip:', 'encodeMediaType', obj, media);
+      }
+      return null;
+    }
+
     // Helper function to PUT to zip: protocol and complement file if specified path does not exist
     async function ensureFile(host, targetPath, content, contentType) {
-      const checkReq = new Request(`zip://${host}/${targetPath}`, { method: 'GET' });
-      const checkRes = await client.fetch(checkReq);
+      const checkReq = new Request(`epub://${host}/${targetPath}`, { method: 'GET' });
+      const checkRes = await client.applyHandler('zip:', 'getZip', checkReq, archives);
 
       if (checkRes.status === 404) {
-        const putReq = new Request(`zip://${host}/${targetPath}`, {
+        const putReq = new Request(`epub://${host}/${targetPath}`, {
           method: 'PUT',
           headers: {
             'Content-Type': contentType,
@@ -141,7 +146,7 @@
           },
           body: new TextEncoder().encode(content)
         });
-        await client.fetch(putReq);
+        await client.applyHandler('zip:', 'putZip', putReq, archives);
       }
     }
   }

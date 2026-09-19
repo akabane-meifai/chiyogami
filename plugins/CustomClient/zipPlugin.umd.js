@@ -39,145 +39,67 @@
     const archives = (options.sources && typeof options.sources === 'object') ? options.sources : {};
 
     client
-      .setHandler('zip:', { setSource, getSource, encodeMediaType })
+      .setHandler('zip:', { setSource, getSource, encodeMediaType, trySetZip, getZip, postZip, putZip, deleteZip })
       .define('zip:', handler);
 
     return { name: 'zip' };
 
-    function getSource(ctx) {
-      return archives[ctx.name] || null;
+    async function postPutRequest(request, archives) {
+      const { hostname, pathname } = new URL(request.url);
+      if (!archives[hostname]) {
+        archives[hostname] = { entries: new Map() };
+      }
+      const archive = archives[hostname];
+      const decodedPath = decodeURIComponent(pathname.startsWith('/') ? pathname.slice(1) : pathname);
+      const contentType = request.headers.get('Content-Type') || '';
+
+      // 1. Replace entire ZIP archive
+      if (!decodedPath && contentType.includes('application/zip')) {
+        const blob = await request.blob();
+        const parsed = await parseZip(blob);
+        archives[hostname] = parsed;
+        return { data: { url: request.url, files: [...parsed.entries.keys()] } };
+      }
+
+      // 2. Add or update files via multipart/form-data
+      if (contentType.includes('multipart/form-data')) {
+        try {
+          const formData = await request.formData();
+          const addedUrls = [];
+
+          for (const [key, value] of formData.entries()) {
+            if (value instanceof Blob) {
+              // Determine file path (prioritize path in URL if available; otherwise use file/key name)
+              const entryUrl = pathname.endsWith('/') ? new URL(encodeURIComponent(value.name || key), request.url) : new URL(request.url);
+              const entryPath = decodeURIComponent(entryUrl.pathname.startsWith('/') ? entryUrl.pathname.slice(1) : entryUrl.pathname);
+              const data = new Uint8Array(await value.arrayBuffer());
+              const entry = await createZipEntry(entryPath, data, request.headers);
+              archive.entries.set(entryPath, entry);
+              addedUrls.push(entryUrl.href);
+            }
+          }
+          return { data: { url: addedUrls.length === 1 ? addedUrls[0] : addedUrls } };
+        } catch (err) {
+          return new Response(`Multipart Error: ${err.message}`, { status: 400 });
+        }
+      }
+
+      // 3. Add or update single binary file (Octet-Stream, etc.)
+      if (!decodedPath) {
+        return new Response('Bad Request: Missing file path', { status: 400 });
+      }
+        
+      const data = new Uint8Array(await request.arrayBuffer());
+      const entry = await createZipEntry(decodedPath, data, request.headers);
+      archive.entries.set(decodedPath, entry);
+      return { data: { url: request.url, crc: entry.crc.toString(16), compression: entry.compression } };
     }
 
-    async function handler(request) {
-      const url = new URL(request.url);
-      const host = url.hostname;
-
-      if (!archives[host]) {
-        if (request.method === 'PUT' || request.method === 'POST') {
-          archives[host] = { entries: new Map() };
-        } else {
-          return new Response('Archive Not Found', { status: 404 });
-        }
+    function handler(request) {
+      const handlerName = request.method.toLowerCase() + 'Zip';
+      if (client.hasHandler('zip:', handlerName)) {
+        return client.applyHandler('zip:', handlerName, request, archives);
       }
-
-      const archive = archives[host];
-      let pathname = decodeURIComponent(url.pathname);
-      if (pathname.startsWith('/')) pathname = pathname.slice(1);
-
-      // ==================== GET ====================
-      if (request.method === 'GET') {
-        const accept = request.headers.get('Accept') || '';
-        const isDownload = !pathname && (
-          url.searchParams.has('download') ||
-          accept.includes('application/zip')
-        );
-
-        if (isDownload) {
-          const index = url.searchParams.has('index') ? url.searchParams.get('index') : false;
-          const zipBlob = await buildZip(archive, { index });
-          
-          return new Response(zipBlob, {
-            status: 200,
-            headers: {
-              'Content-Type': 'application/zip',
-              'Content-Disposition': `attachment; filename="${host}.zip"`
-            }
-          });
-        }
-
-        if (url.pathname.endsWith('/')) {
-          const prefix = pathname;
-          const list = [];
-          for (const name of archive.entries.keys()) {
-            if (name.startsWith(prefix)) {
-              list.push(new URL('/' + name, request.url).href);
-            }
-          }
-          return { data: { url: list } };
-        }
-
-        const entry = archive.entries.get(pathname);
-        if (!entry) {
-          return new Response('File Not Found', { status: 404 });
-        }
-
-        const mime = guessMime(pathname);
-        return new Response(entry.data, {
-          status: 200,
-          headers: {
-            'Content-Type': mime,
-            'Content-Length': entry.data.byteLength,
-            'X-CRC32': entry.crc.toString(16)
-          }
-        });
-      }
-
-      // ==================== PUT / POST ====================
-      if (request.method === 'PUT' || request.method === 'POST') {
-        const contentType = request.headers.get('Content-Type') || '';
-
-        // 1. Replace entire ZIP archive
-        if (!pathname && contentType.includes('application/zip')) {
-          const blob = await request.blob();
-          const parsed = await parseZip(blob);
-          archives[host] = parsed;
-          return { data: { url: request.url, files: [...parsed.entries.keys()] } };
-        }
-
-        // 2. Add or update files via multipart/form-data
-        if (contentType.includes('multipart/form-data')) {
-          try {
-            const formData = await request.formData();
-            const addedUrls = [];
-
-            for (const [key, value] of formData.entries()) {
-              if (value instanceof Blob) {
-                // Determine file path (prioritize path in URL if available; otherwise use file/key name)
-                let entryPath = pathname;
-                if (!entryPath || entryPath.endsWith('/')) {
-                  const fileName = value.name || key;
-                  entryPath = `${entryPath}${fileName}`;
-                }
-
-                const data = new Uint8Array(await value.arrayBuffer());
-                const entry = await createZipEntry(entryPath, data, request.headers);
-                archive.entries.set(entryPath, entry);
-                
-                addedUrls.push(new URL(entryPath, request.url).href);
-              }
-            }
-
-            return { data: { url: addedUrls.length === 1 ? addedUrls[0] : addedUrls } };
-          } catch (err) {
-            return new Response(`Multipart Error: ${err.message}`, { status: 400 });
-          }
-        }
-
-        // 3. Add or update single binary file (Octet-Stream, etc.)
-        if (!pathname) {
-          return new Response('Bad Request: Missing file path', { status: 400 });
-        }
-
-        const data = new Uint8Array(await request.arrayBuffer());
-        const entry = await createZipEntry(pathname, data, request.headers);
-
-        archive.entries.set(pathname, entry);
-        return { data: { url: request.url, crc: entry.crc.toString(16), compression: entry.compression } };
-      }
-
-      // ==================== DELETE ====================
-      if (request.method === 'DELETE') {
-        if (!pathname) {
-          delete archives[host];
-          return { data: { url: request.url } };
-        }
-        if (archive.entries.has(pathname)) {
-          archive.entries.delete(pathname);
-          return { data: { url: request.url } };
-        }
-        return new Response('File Not Found', { status: 404 });
-      }
-
       return new Response('Method Not Allowed', { status: 405 });
     }
 
@@ -217,15 +139,11 @@
     // Helpers
     // ==============================
     function setSource(ctx, data) {
-      if (data instanceof Blob || data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
-        parseZip(data).then(parsed => {
-          archives[ctx.name] = parsed;
-          ctx.sources[ctx.name] = parsed;
-        });
-      } else {
-        archives[ctx.name] = data;
-        ctx.sources[ctx.name] = data;
-      }
+      return client.applyHandler('zip:', 'trySetZip', ctx.name, data, archives);
+    }
+
+    function getSource(ctx) {
+      return archives[ctx.name] || null;
     }
 
     function encodeMediaType(obj, media) {
@@ -236,6 +154,101 @@
         });
       }
       return null;
+    }
+
+    function trySetZip(name, data, archives) {
+      if (data instanceof Blob || data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+        archives[name] = parseZip(data);
+      } else {
+        archives[name] = data;
+      }
+    }
+
+    async function getZip(request, archives) {
+      const { hostname, pathname, searchParams } = new URL(request.url);
+      if (!archives[hostname]) {
+        return new Response('Archive Not Found', { status: 404 });
+      }
+
+      if (archives[hostname] instanceof Promise) {
+        archives[hostname] = await archives[hostname];
+      }
+      const archive = archives[hostname];
+      const decodedPath = decodeURIComponent(pathname.startsWith('/') ? pathname.slice(1) : pathname);
+      const accept = request.headers.get('Accept') || '';
+      const isDownload = !decodedPath && (
+        searchParams.has('download') ||
+        accept.includes('application/zip')
+      );
+      if (isDownload) {
+        const index = searchParams.has('index') ? searchParams.get('index') : false;
+        const zipBlob = await buildZip(archive, { index });
+        return new Response(zipBlob, {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/zip',
+            'Content-Disposition': `attachment; filename="${hostname}.zip"`
+          }
+        });
+      }
+
+      if (pathname.endsWith('/')) {
+        const prefix = decodedPath;
+        const list = [];
+        for (const name of archive.entries.keys()) {
+          if (name.startsWith(prefix)) {
+            list.push(new URL('/' + name, request.url).href);
+          }
+        }
+        return { data: { url: list } };
+      }
+
+      const entry = archive.entries.get(decodedPath);
+      if (!entry) {
+        return new Response('File Not Found', { status: 404 });
+      }
+
+      const mime = guessMime(decodedPath);
+      return new Response(entry.data, {
+        status: 200,
+        headers: {
+          'Content-Type': mime,
+          'Content-Length': entry.data.byteLength,
+          'X-CRC32': entry.crc.toString(16)
+        }
+      });
+    }
+
+    function postZip(request, archives) {
+      return postPutRequest(request, archives);
+    }
+
+    function putZip(request, archives) {
+      return postPutRequest(request, archives);
+    }
+
+    async function deleteZip(request, archives) {
+      const { hostname, pathname } = new URL(request.url);
+      if (!archives[hostname]) {
+        return new Response('Archive Not Found', { status: 404 });
+      }
+      
+      const decodedPath = decodeURIComponent(pathname.startsWith('/') ? pathname.slice(1) : pathname);
+      if (!decodedPath) {
+        delete archives[hostname];
+        return { data: { url: request.url } };
+      }
+      
+      if (archives[hostname] instanceof Promise) {
+        archives[hostname] = await archives[hostname];
+      }
+      const archive = archives[hostname];
+      if (archive.entries.has(decodedPath)) {
+        archive.entries.delete(decodedPath);
+        return { data: { url: request.url } };
+      }
+
+      return new Response('File Not Found', { status: 404 });
     }
 
     // ==============================
