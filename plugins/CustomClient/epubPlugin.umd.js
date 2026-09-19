@@ -105,10 +105,11 @@
 
       // --- 4. Handle response replacement ---
       const accept = request.headers.get('Accept') || '';
-      const isDownload = !pathname ||
+      const isDownload = !pathname && (
         url.searchParams.has('download') ||
         accept.includes('application/epub+zip') ||
-        accept.includes('application/zip');
+        accept.includes('application/zip')
+      );
 
       // Update Content-Type to application/epub+zip and set extension to .epub on download
       if (isDownload && response.ok) {
