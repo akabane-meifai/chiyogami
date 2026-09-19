@@ -67,9 +67,10 @@
       // ==================== GET ====================
       if (request.method === 'GET') {
         const accept = request.headers.get('Accept') || '';
-        const isDownload = !pathname ||
+        const isDownload = !pathname && (
           url.searchParams.has('download') ||
-          accept.includes('application/zip');
+          accept.includes('application/zip')
+        );
 
         if (isDownload) {
           const index = url.searchParams.has('index') ? url.searchParams.get('index') : false;
